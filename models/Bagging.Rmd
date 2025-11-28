@@ -1,5 +1,5 @@
 ---
-title: "Bagging"
+title: "Bagging with Hyperparameter Tuning"
 output: html_notebook
 ---
 
@@ -8,8 +8,8 @@ output: html_notebook
 library(randomForest)
 library(caret)  
 library(readr) 
-train <- read_csv("Desktop/Stat Learning/Final Project/train.csv")
-test <- read_csv("Desktop/Stat Learning/Final Project/test.csv")
+train <- read_csv("~/Desktop/Stat Learning/Final Project/train.csv")
+test <- read_csv("~/Desktop/Stat Learning/Final Project/test.csv")
 # convert data to avoid annoying error
 train$Y <- as.factor(train$Y)
 ```
@@ -19,12 +19,20 @@ train$Y <- as.factor(train$Y)
 set.seed(1)
 folds <- createFolds(train$Y, k = 5, list = TRUE, returnTrain = FALSE)
 
-# possible node sizes (found 300 to consistently be the best)
-node_sizes <- c(100, 200, 300, 400, 500, 1000, 2000)
+# hyperparameter grid
+# nodesize: Min samples per leaf (prevents overfitting)
+# maxnodes: Max terminal nodes (limits depth/complexity)
+hyper_grid <- expand.grid(
+  nodesize = c(150, 175, 200, 225, 250, 275, 300, 325, 350, 375, 400, 425, 450),
+  maxnodes = c(150, 175, 200, 225, 250, 275, 300, 325, 350, 375, 400, 425, 450) 
+)
 
-results <- data.frame(nodesize = integer(), avg_f1 = double())
+results <- data.frame(nodesize = integer(), maxnodes = character(), avg_f1 = double(), stringsAsFactors = FALSE)
 
-for (ns in node_sizes) {
+for (row in 1:nrow(hyper_grid)) {
+  
+  current_ns <- hyper_grid$nodesize[row]
+  current_mn <- hyper_grid$maxnodes[row] 
   f1_scores <- c() 
   
   for (i in 1:5) {
@@ -34,14 +42,14 @@ for (ns in node_sizes) {
     val_fold <- train[val_idx, ]
     
     # train the model
-    model <- randomForest(Y ~ ., data = train_fold, mtry = 10, nodesize = ns, ntree = 100)
+    model <- randomForest(Y ~ ., data = train_fold, mtry = 10, nodesize = current_ns, maxnodes = current_mn, ntree = 100)
     
     # probabilities used instead for threshold tuning later
     prob_preds <- predict(model, newdata = val_fold, type = "prob")[, "1"]
     
     # now optimize the threshold
     best_fold_f1 <- 0
-    thresholds <- seq(0.1, 0.6, by = 0.05)
+    thresholds <- seq(0.1, 0.5, by = 0.05)
     actual_numeric <- ifelse(val_fold$Y == "1", 1, 0)
     
     for (thresh in thresholds) {
@@ -50,51 +58,55 @@ for (ns in node_sizes) {
       tp <- sum(pred_numeric == 1 & actual_numeric == 1)
       fp <- sum(pred_numeric == 1 & actual_numeric == 0)
       fn <- sum(pred_numeric == 0 & actual_numeric == 1)
+      
       prec <- if ((tp + fp) > 0) tp / (tp + fp) else 0
       rec  <- if ((tp + fn) > 0) tp / (tp + fn) else 0
+      
       f1 <- 0
-      if ((prec + rec) > 0) {f1 <- (2*prec*rec) / (prec+rec)} # calculate the f1 score
-      if (f1 > best_fold_f1) best_fold_f1 <- f1 # update the best f1 score 
-      }
+      if ((prec + rec) > 0) {f1 <- (2*prec*rec) / (prec+rec)}
+      
+      if (f1 > best_fold_f1) best_fold_f1 <- f1 
+    }
     
-    # record f1 scores for the fold
     f1_scores <- c(f1_scores, best_fold_f1)
   }
   
   avg_f1 <- mean(f1_scores)
-  cat(paste("Nodesize:", ns, "- Avg F1:", round(avg_f1, 4), "\n"))
-  results <- rbind(results, data.frame(nodesize = ns, avg_f1 = avg_f1))
+  cat(paste("Nodesize:", current_ns, "| MaxNodes:", current_mn, "- Avg F1:", round(avg_f1, 4), "\n"))
+  results <- rbind(results, data.frame(nodesize = current_ns, maxnodes = current_mn, avg_f1 = avg_f1))
 }
 
-# select best nodesize based on the highgest average f1 score
-best_ns <- results$nodesize[which.max(results$avg_f1)]
-print(paste("Best Nodesize found:", best_ns))
+# select best parameters
+best_row_idx <- which.max(results$avg_f1)
+best_ns <- results$nodesize[best_row_idx]
+best_mn <- results$maxnodes[best_row_idx]
+
+print(paste("Best Configuration Found -> Nodesize:", best_ns, "MaxNodes:", best_mn))
 
 # retrain on ALL the data now and make more trees for robustness
-final_model <- randomForest(Y ~ ., data = train, mtry = 10, nodesize = best_ns, ntree = 1000)
+set.seed(1)
+final_model <- randomForest(Y ~ ., data = train, mtry = 10, nodesize = best_ns, maxnodes = best_mn, ntree = 500)
 ```
 
 ```{r}
-set.seed(1)
 # find the out of bag probabilities 
+set.seed(1)
 oob_probs <- predict(final_model, type = "prob")[, "1"]
 
 max_oob_f1 <- 0
 best_threshold <- 0
-fine_thresholds <- seq(0.001, 1, by = 0.001)
+fine_thresholds <- seq(0.001, 0.5, by = 0.001)
 
 # store actual results to compare and tune the threshold from OOB
 actuals <- train$Y 
 
 for (thresh in fine_thresholds) {
-  # create logic vector based on OOB and threshold to later calculate an f1
   pred_class <- ifelse(oob_probs > thresh, 1, 0)
   
+  # manual calculation to avoid crashing
   tp <- sum(pred_class == 1 & actuals == 1)
   fp <- sum(pred_class == 1 & actuals == 0)
   fn <- sum(pred_class == 0 & actuals == 1)
-  
-  # maulual calculation to avoid crashing
   prec <- if((tp + fp) > 0) tp / (tp + fp) else 0
   rec  <- if((tp + fn) > 0) tp / (tp + fn) else 0
   
@@ -122,7 +134,7 @@ final_preds <- ifelse(final_probs > best_threshold, 1, 0)
 submission <- data.frame(ID = test$ID, Y = final_preds)
 write.csv(submission, "~/Desktop/Bagging_submission.csv", row.names = FALSE)
 
-# reality check (propotion default should be around 2-3%)
+# reality check (proportion default should be around 2-3%)
 prop_ones <- mean(submission$Y)
 print(paste("Proportion of 1s in submission:", round(prop_ones,4)))
 ```
