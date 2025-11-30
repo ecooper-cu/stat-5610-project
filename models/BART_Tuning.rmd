@@ -1,0 +1,159 @@
+---
+title: "BART_Tuning"
+output: html_document
+date: "2025-11-14"
+---
+
+```{r setup, include=FALSE}
+install.packages("ISLR2")
+install.packages("BART")
+install.packages("tidyverse")
+install.packages("caret")
+install.packages("ipred")
+install.packages("dplyr")
+```
+
+```{r}
+library(BART)
+library(ISLR2)
+library(tidyverse)
+library(caret)
+library(ipred)
+library(dplyr)
+```
+
+```{r}
+data <- read.csv("/Users/lillianbates/stat-5610-project/data/train.csv")
+set.seed(1)
+
+n = nrow(data)
+train_idx = sample(seq_len(n), size = 0.75 * n)
+dev_test_idx = setdiff(seq_len(n), train_idx)
+
+X = data[, !(names(data) %in% c("Y"))] 
+X = as.data.frame(lapply(X, function(col) as.numeric(as.character(col))))
+Y <- data$Y
+```
+
+K-fold validation with Parameter Tuning: 
+```{r}
+folds <- createFolds(Y, k = 5, list = TRUE, returnTrain = TRUE)
+f1_scores <- c()
+
+param_grid <- expand.grid(
+  ntree  = c(100, 150, 200),
+  k      = c(2, 5),
+  power  = c(1, 2),
+  base   = c(0.95, 0.99)
+)
+
+results <- data.frame()
+
+for (g in 1:nrow(param_grid)) {
+  params <- param_grid[g, ]
+  cat("\nTesting parameter set:", paste(names(params), "=", params, collapse=", "), "\n")
+
+  f1_scores <- c()
+
+  for (i in seq_along(folds)) {
+    cat("Fold", i, "\n")
+  
+    train_idx <- folds[[i]]
+    test_idx <- setdiff(seq_len(nrow(data)), train_idx)
+  
+    x_train <- X[train_idx, ]
+    y_train <- Y[train_idx]
+    x_test  <- X[test_idx, ]
+    y_test  <- Y[test_idx]
+  
+    # Fit pbart
+    bart_model <- pbart(
+      x.train = x_train,
+      y.train = y_train,
+      x.test  = x_test,
+      nskip   = 400,
+      ndpost  = 200, 
+      ntree = params$ntree , 
+      k = params$k, 
+      power = params$power,
+      base = params$base
+  )
+  
+  y_pred_proba <- bart_model$prob.test.mean
+  
+  # Binary prediction using 0.5 threshold
+  y_pred <- ifelse(y_pred_proba > 0.5, 1, 0)
+  
+  y_true  <- factor(y_test,  levels = c(0,1))
+  y_pred2 <- factor(y_pred,  levels = c(0,1))
+  
+  # Compute F1
+  f1 <- F_meas(y_true, y_pred2)
+  f1_scores <- c(f1_scores, f1)
+  
+  cat("F1 score for fold", i, ":", round(f1, 3), "\n\n")
+}
+
+mean_f1 <- mean(f1_scores)
+results <- rbind(
+    results,
+    data.frame(
+      ntree = params$ntree,
+      k     = params$k,
+      power = params$power,
+      base = params$base,
+      meanF1 = mean_f1
+    )
+  )
+
+  cat("\nMean F1 for this parameter set:", round(mean_f1, 3), "\n")
+}
+
+# Print all results
+print(results)
+
+# Identify best parameter set
+best <- results[which.max(results$meanF1), ]
+cat("\nBest parameter set:\n")
+print(best)
+```
+```
+Creating predictions for submissions:  
+```{r}
+ bart_model <- pbart(
+   x.train = X,
+   y.train = Y,
+   ntree = 200,
+   k = 5,
+   power = 2,
+   base = 0.95 ,
+   nskip   = 1000,
+   ndpost  = 1000
+ )
+
+#Load test set 
+test_data <- read.csv("/Users/lillianbates/stat-5610-project/data/test.csv")
+X_test <- test_data[, names(X)]  # select the same columns as train
+
+#Predict probabilities on test set
+y_test_proba <- predict(bart_model, newdata = X_test)$prob.test.mean
+
+#Convert to class labels using 0.5 threshold
+y_test_pred <- as.integer(y_test_proba > 0.5)
+rm(probs)
+gc()
+
+#Prepare submission dataframe
+submission <- data.frame(
+  ID = test_data$ID,
+  Y  = y_test_pred
+)
+
+#Write to CSV
+write.csv(
+  submission,
+  "/Users/lillianbates/Desktop/solution_1.csv",
+  row.names = FALSE
+)
+
+```
